@@ -65,10 +65,27 @@ _pipe      = None
 _whisper   = None
 
 
+def ensure_model():
+    """Baixa o modelo do HuggingFace se não existir localmente."""
+    model_dir = Path(MODEL_PATH)
+    safetensors = model_dir / "model.safetensors"
+    if safetensors.exists():
+        print(f"[Inoria] Modelo encontrado em {MODEL_PATH} ✅")
+        return
+    hf_repo = os.getenv("HF_REPO", "youka9987/inoria-model")
+    hf_token = os.getenv("HF_TOKEN")
+    print(f"[Inoria] Modelo não encontrado. Baixando {hf_repo} do HuggingFace...")
+    from huggingface_hub import snapshot_download
+    model_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_download(hf_repo, local_dir=str(model_dir), token=hf_token)
+    print("[Inoria] Download concluído ✅")
+
+
 def load_all():
     """Carrega modelo + Whisper na inicialização do worker."""
     global _tokenizer, _pipe, _whisper
 
+    ensure_model()
     print(f"[Inoria] Carregando tokenizer de {MODEL_PATH}...")
     _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
