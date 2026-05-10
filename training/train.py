@@ -36,10 +36,34 @@ from transformers import (
     TrainingArguments,
 )
 from trl import SFTTrainer
-try:
-    from trl import DataCollatorForCompletionOnlyLM
-except ImportError:
-    from trl.trainer import DataCollatorForCompletionOnlyLM
+from transformers import DataCollatorForLanguageModeling
+import numpy as np
+
+class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
+    """
+    Collator que mascara o loss no prompt — só treina na resposta do assistant.
+    Compatível com TRL 1.x que removeu essa classe.
+    """
+    def __init__(self, response_template: str, tokenizer, **kwargs):
+        super().__init__(tokenizer=tokenizer, mlm=False, **kwargs)
+        self.response_template = response_template
+        self.response_token_ids = tokenizer.encode(response_template, add_special_tokens=False)
+
+    def torch_call(self, examples):
+        batch = super().torch_call(examples)
+        for i in range(len(batch["labels"])):
+            response_token_ids = self.response_token_ids
+            input_ids = batch["input_ids"][i].tolist()
+            # Encontra a última ocorrência do template de resposta
+            for idx in range(len(input_ids) - len(response_token_ids), -1, -1):
+                if input_ids[idx: idx + len(response_token_ids)] == response_token_ids:
+                    # Mascara tudo antes da resposta
+                    batch["labels"][i, :idx + len(response_token_ids)] = -100
+                    break
+            else:
+                # Template não encontrado — mascara tudo (não aprende nada desse exemplo)
+                batch["labels"][i] = -100
+        return batch
 from rich.console import Console
 
 console = Console()
