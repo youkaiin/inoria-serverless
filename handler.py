@@ -57,6 +57,16 @@ TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.4"))
 TOP_P          = float(os.getenv("TOP_P", "0.85"))
 REPETITION_PEN = float(os.getenv("REPETITION_PEN", "1.2"))
 
+# Frases do system prompt que indicam vazamento (model fazendo text completion).
+# Se a saída contém alguma dessas, o modelo não aprendeu o chat template.
+_SYSTEM_PROMPT_LEAKS = [
+    "respostas curtas", "nunca quebre", "nunca use asteriscos",
+    "formato de resposta", "ferramentas disponíveis", "regras absolutas",
+    "personalidade:", "estado atual:", "seu criador",
+    "fale sempre em português", "você é inori",
+    "você controla o sistema", "sistema de dicas",
+]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado global — carregado uma única vez por worker
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,8 +279,17 @@ def generate_reply(messages):
         except Exception as e:
             print(f'[Inoria] Falha ao parsear JSON: {e} | json_str={json_str[:100]}')
 
+    # ── Detecta vazamento do system prompt ───────────────────────────────────
+    # Se o modelo está fazendo text completion (não seguiu o chat template),
+    # a saída conterá trechos do system prompt. Descartamos nesse caso.
+    raw_lower = raw.lower()
+    is_system_leak = any(leak in raw_lower for leak in _SYSTEM_PROMPT_LEAKS)
+    if is_system_leak:
+        print(f'[Inoria] Vazamento de system prompt detectado. Raw: {raw[:100]}')
+        return {'reply': 'Oi! Tô aqui 😊', 'acoes': []}
+
     # ── Extrai texto de tags LimaRP (<FIRST>texto</FIRST>, etc.) ─────────────
-    # O modelo foi treinado com LimaRP e pode gerar este formato em vez de JSON.
+    # O modelo pode ter sido treinado com LimaRP e gera este formato em vez de JSON.
     # Em vez de descartar, extraímos o conteúdo útil das tags.
     lirarp_match = re.search(
         r'<(?:FIRST|SECOND|THIRD|USER)>(.*?)</(?:FIRST|SECOND|THIRD|USER)>',
