@@ -226,9 +226,14 @@ def main():
     )
 
     # ── 7. Trainer ────────────────────────────────────────────────────────────
+    # TRL 1.4+ renomeou 'tokenizer' para 'processing_class'
+    import inspect
+    sft_params = inspect.signature(SFTTrainer.__init__).parameters
+    tokenizer_kwarg = "processing_class" if "processing_class" in sft_params else "tokenizer"
+
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        **{tokenizer_kwarg: tokenizer},
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
