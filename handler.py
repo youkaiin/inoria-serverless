@@ -344,6 +344,47 @@ def handler(job):
             "device": "cuda" if torch.cuda.is_available() else "cpu",
         }
 
+    # ── DEBUG (temporário — remove após diagnóstico) ───────────────────────
+    elif action == "debug_raw":
+        # Retorna o texto bruto gerado pelo modelo sem nenhum processamento.
+        # Usar para diagnosticar o formato real de saída do modelo.
+        import re as _re
+        message       = inp.get("message", "Bom dia!")
+        user_name     = inp.get("user_name", "Youka")
+        humor_level   = int(inp.get("humor_level", 75))
+        afinity_level = int(inp.get("afinity_level", 90))
+        extra_context = inp.get("extra_context", "")
+        tips_enabled  = bool(inp.get("tips_enabled", False))
+
+        system_prompt = build_system_prompt(user_name, humor_level, afinity_level, extra_context, tips_enabled)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": message},
+        ]
+        device = next(_model.parameters()).device
+        text = _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = _tokenizer(text, return_tensors='pt').to(device)
+        input_length = inputs['input_ids'].shape[1]
+        with torch.no_grad():
+            outputs_raw = _model.generate(
+                **inputs,
+                max_new_tokens=200,
+                temperature=0.3,
+                repetition_penalty=1.18,
+                pad_token_id=_tokenizer.eos_token_id,
+                eos_token_id=_tokenizer.eos_token_id,
+                do_sample=True,
+            )
+        raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
+        json_found = _extract_outermost_json(raw)
+        return {
+            "raw_output":      raw,
+            "raw_length":      len(raw),
+            "input_tokens":    input_length,
+            "json_found":      json_found,
+            "has_lirarp_tags": bool(_re.search(r'<(FIRST|SECOND|USER|THIRD)>', raw)),
+        }
+
     else:
         return {"error": f"Ação desconhecida: {action}"}
 
