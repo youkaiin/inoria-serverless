@@ -235,9 +235,6 @@ def generate_reply(messages):
     import re
     device = next(_model.parameters()).device
 
-    # add_generation_prompt=True é OBRIGATÓRIO para o Qwen2.5 saber que é a
-    # vez do assistant falar. Sem isso ele "completa" o prompt como se fosse
-    # treinamento, vazando tags do LimaRP (<FIRST>, <SECOND>, etc.).
     text = _tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -245,9 +242,6 @@ def generate_reply(messages):
     )
 
     inputs = _tokenizer(text, return_tensors='pt').to(device)
-    # input_length guarda o tamanho exato do contexto de entrada.
-    # O decode usa [input_length:] para retornar APENAS os tokens novos,
-    # evitando que o system prompt vazasse na resposta final.
     input_length = inputs['input_ids'].shape[1]
 
     with torch.no_grad():
@@ -255,17 +249,31 @@ def generate_reply(messages):
             **inputs,
             max_new_tokens=150,
             temperature=0.3,
-            repetition_penalty=1.18,  # penaliza repetição das tags do LimaRP
+            repetition_penalty=1.18,
             pad_token_id=_tokenizer.eos_token_id,
             eos_token_id=_tokenizer.eos_token_id,
             do_sample=True,
         )
 
-    # Recorta apenas os tokens gerados (exclui o contexto de entrada)
-    raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
-    print(f'[Inoria] Raw output: {raw[:400]}')
+    # ── Fix 1: Recorte por string (anti-leak) ────────────────────────────────
+    # O recorte por input_length depende do tokenizer contar certo. Se o treino
+    # bagunçou as tags especiais, a contagem erra e o system prompt vaza.
+    # Solução: decodificar TUDO e cortar pelo marcador de texto do Qwen2.5.
+    # O Qwen sempre coloca "<|im_start|>assistant\n" antes de falar.
+    # Pegamos só o que vem DEPOIS desse marcador — imune a erros de contagem.
+    resposta_bruta_completa = _tokenizer.decode(outputs_raw[0], skip_special_tokens=False)
+    MARCADOR_ASSISTANT = "<|im_start|>assistant"
+    if MARCADOR_ASSISTANT in resposta_bruta_completa:
+        raw = resposta_bruta_completa.split(MARCADOR_ASSISTANT)[-1]
+        raw = raw.replace("<|im_end|>", "").strip()
+        print(f'[Inoria] Recorte por string OK. Raw: {raw[:300]}')
+    else:
+        # Fallback: recorte por token count (método original)
+        raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
+        print(f'[Inoria] Recorte por token count. Raw: {raw[:300]}')
 
-    # ── Tenta extrair JSON primeiro (modelo bem treinado) ────────────────────
+    # ── Fix 2: Tenta extrair JSON ─────────────────────────────────────────────
+    # Usa _extract_outermost_json (respeita aninhamento) em vez de regex não-guloso.
     json_str = _extract_outermost_json(raw)
     if json_str:
         try:
@@ -275,39 +283,46 @@ def generate_reply(messages):
             if not isinstance(acoes, list):
                 acoes = []
             if reply_text:
+                print(f'[Inoria] JSON válido extraído. Reply: {reply_text[:80]}')
                 return {'reply': reply_text, 'acoes': acoes}
         except Exception as e:
             print(f'[Inoria] Falha ao parsear JSON: {e} | json_str={json_str[:100]}')
 
-    # ── Detecta vazamento do system prompt ───────────────────────────────────
-    # Se o modelo está fazendo text completion (não seguiu o chat template),
-    # a saída conterá trechos do system prompt. Descartamos nesse caso.
-    raw_lower = raw.lower()
-    is_system_leak = any(leak in raw_lower for leak in _SYSTEM_PROMPT_LEAKS)
-    if is_system_leak:
-        print(f'[Inoria] Vazamento de system prompt detectado. Raw: {raw[:100]}')
-        return {'reply': 'Oi! Tô aqui 😊', 'acoes': []}
-
-    # ── Extrai texto de tags LimaRP (<FIRST>texto</FIRST>, etc.) ─────────────
-    # O modelo pode ter sido treinado com LimaRP e gera este formato em vez de JSON.
-    # Em vez de descartar, extraímos o conteúdo útil das tags.
+    # ── Fix 3: Extrai texto de tags LimaRP (<FIRST>texto</FIRST>) ────────────
+    # O modelo foi treinado em roleplay e pode responder com tags LimaRP.
+    # Extraímos o conteúdo e removemos asteriscos de ação (*sorri*, etc.).
     lirarp_match = re.search(
         r'<(?:FIRST|SECOND|THIRD|USER)>(.*?)</(?:FIRST|SECOND|THIRD|USER)>',
         raw, re.DOTALL
     )
     if lirarp_match:
-        texto_extraido = lirarp_match.group(1).strip()
-        # Remove ações entre asteriscos (*sorri*, *faz isso*) — estilo LimaRP
-        texto_extraido = re.sub(r'\*[^*]+\*', '', texto_extraido).strip()
+        texto_extraido = re.sub(r'\*[^*]+\*', '', lirarp_match.group(1)).strip()
         texto_extraido = re.sub(r'\s+', ' ', texto_extraido).strip()
         if texto_extraido and len(texto_extraido) < 500:
-            print(f'[Inoria] Texto extraído de tag LimaRP: {texto_extraido[:100]}')
+            print(f'[Inoria] Texto de tag LimaRP: {texto_extraido[:100]}')
             return {'reply': texto_extraido, 'acoes': []}
 
-    # ── Fallback: usa texto bruto se razoável ────────────────────────────────
+    # ── Fix 4: Envelopamento inteligente — texto puro vira JSON ──────────────
+    # Se a IA respondeu naturalmente (sem JSON, sem tags), pegamos o texto
+    # direto e embalamos num JSON válido para o bot. Não desperdiçamos a resposta.
+    # Antes de usar, filtra vazamento de system prompt.
+    raw_lower = raw.lower()
+    is_system_leak = any(leak in raw_lower for leak in _SYSTEM_PROMPT_LEAKS)
+    if is_system_leak:
+        print(f'[Inoria] Vazamento de system prompt detectado, descartando.')
+        # Mesmo vazando, tenta pegar só a primeira frase antes das instruções
+        primeira_frase = raw.split('\n')[0].strip()
+        if primeira_frase and len(primeira_frase) < 200 and not any(
+            leak in primeira_frase.lower() for leak in _SYSTEM_PROMPT_LEAKS
+        ):
+            return {'reply': primeira_frase, 'acoes': []}
+        return {'reply': 'Oi! Tô aqui 😊', 'acoes': []}
+
+    # Texto limpo — embala e entrega
     raw_limpo = re.sub(r'\*[^*]+\*', '', raw).strip()
     raw_limpo = re.sub(r'\s+', ' ', raw_limpo).strip()
     if raw_limpo and len(raw_limpo) < 500:
+        print(f'[Inoria] Envelopamento de texto puro: {raw_limpo[:80]}')
         return {'reply': raw_limpo, 'acoes': []}
 
     return {'reply': 'Oi! Pode repetir?', 'acoes': []}
