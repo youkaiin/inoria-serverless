@@ -76,15 +76,30 @@ _whisper   = None
 
 
 def ensure_model():
-    """Baixa o modelo do HuggingFace se não existir localmente."""
+    """Baixa o modelo do HuggingFace se não existir ou estiver incompleto."""
+    import json as _json
     model_dir = Path(MODEL_PATH)
     safetensors = model_dir / "model.safetensors"
-    if safetensors.exists():
+    tokenizer_cfg = model_dir / "tokenizer_config.json"
+
+    # Verifica se o modelo existe E se o tokenizer tem chat_template
+    needs_download = not safetensors.exists()
+    if not needs_download and tokenizer_cfg.exists():
+        try:
+            cfg = _json.load(open(tokenizer_cfg))
+            if "chat_template" not in cfg:
+                print("[Inoria] tokenizer_config.json sem chat_template — re-baixando modelo...")
+                needs_download = True
+        except Exception:
+            needs_download = True
+
+    if not needs_download:
         print(f"[Inoria] Modelo encontrado em {MODEL_PATH} ✅")
         return
+
     hf_repo = os.getenv("HF_REPO", "youka9987/inoria-model")
     hf_token = os.getenv("HF_TOKEN")
-    print(f"[Inoria] Modelo não encontrado. Baixando {hf_repo} do HuggingFace...")
+    print(f"[Inoria] Baixando {hf_repo} do HuggingFace...")
     from huggingface_hub import snapshot_download
     model_dir.mkdir(parents=True, exist_ok=True)
     snapshot_download(hf_repo, local_dir=str(model_dir), token=hf_token)
