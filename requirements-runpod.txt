@@ -1,0 +1,10 @@
+# Dependências para o RunPod Serverless
+# torch é instalado separadamente no Dockerfile com CUDA
+
+runpod>=1.7.0
+transformers==4.46.3
+accelerate>=0.27.0
+safetensors>=0.4.0
+openai-whisper>=20231117
+peft>=0.9.0
+sentencepiece>=0.2.0
