@@ -222,13 +222,23 @@ def generate_reply(messages):
     for token in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
         raw = raw.replace(token, "").strip()
 
+    # Detecta alucinações com placeholders do dataset de treino
+    BAD_PATTERNS = ["<SECOND>", "<FIRST>", "<USER>", "She was not used", "What is your name?"]
+    if any(p in raw for p in BAD_PATTERNS):
+        print(f"[Inoria] ⚠️ Alucinação detectada, retornando fallback.")
+        return {"reply": "Hmm, não entendi muito bem. Pode repetir? 😅", "acoes": []}
+
     try:
         start = raw.find("{")
         end   = raw.rfind("}") + 1
         if start != -1 and end > start:
             data = _json.loads(raw[start:end])
+            reply_text = str(data.get("reply", "") or data.get("mensagem_texto", "") or raw)
+            # Verifica alucinação no reply também
+            if any(p in reply_text for p in BAD_PATTERNS):
+                return {"reply": "Hmm, não entendi muito bem. Pode repetir? 😅", "acoes": []}
             return {
-                "reply": str(data.get("reply", "") or data.get("mensagem_texto", "") or raw),
+                "reply": reply_text,
                 "acoes": data.get("acoes", []),
             }
     except Exception:
