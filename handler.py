@@ -53,9 +53,9 @@ MODEL_PATH     = os.getenv("MODEL_PATH", "./inori-brain/merged-model")
 BOT_OWNER_NAME = os.getenv("BOT_OWNER_NAME", "Youka")
 WHISPER_MODEL  = os.getenv("WHISPER_MODEL", "small")
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "256"))
-TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.85"))
-TOP_P          = float(os.getenv("TOP_P", "0.92"))
-REPETITION_PEN = float(os.getenv("REPETITION_PEN", "1.1"))
+TEMPERATURE    = float(os.getenv("TEMPERATURE", "0.4"))
+TOP_P          = float(os.getenv("TOP_P", "0.85"))
+REPETITION_PEN = float(os.getenv("REPETITION_PEN", "1.2"))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Estado global — carregado uma única vez por worker
@@ -214,10 +214,12 @@ def generate_reply(messages):
         repetition_penalty=REPETITION_PEN,
         do_sample=True,
         pad_token_id=_tokenizer.eos_token_id,
+        eos_token_id=_tokenizer.eos_token_id,
+        return_full_text=False,
     )
 
     full_text = outputs[0]["generated_text"]
-    raw = full_text[len(text):].strip()
+    raw = full_text.strip()
 
     for token in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
         raw = raw.replace(token, "").strip()
