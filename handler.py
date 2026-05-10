@@ -201,10 +201,33 @@ REGRAS:
 # ─────────────────────────────────────────────────────────────────────────────
 # Geração de resposta
 # ─────────────────────────────────────────────────────────────────────────────
+def _extract_outermost_json(text):
+    """
+    Extrai o JSON mais externo de uma string, respeitando chaves aninhadas.
+    Resolve o bug do regex não-guloso que parava no primeiro '}' encontrado,
+    quebrando o parse quando 'acoes' continha comandos (JSON aninhado).
+    """
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
 def generate_reply(messages):
     import re
     device = next(_model.parameters()).device
 
+    # add_generation_prompt=True é OBRIGATÓRIO para o Qwen2.5 saber que é a
+    # vez do assistant falar. Sem isso ele "completa" o prompt como se fosse
+    # treinamento, vazando tags do LimaRP (<FIRST>, <SECOND>, etc.).
     text = _tokenizer.apply_chat_template(
         messages,
         tokenize=False,
@@ -212,6 +235,9 @@ def generate_reply(messages):
     )
 
     inputs = _tokenizer(text, return_tensors='pt').to(device)
+    # input_length guarda o tamanho exato do contexto de entrada.
+    # O decode usa [input_length:] para retornar APENAS os tokens novos,
+    # evitando que o system prompt vazasse na resposta final.
     input_length = inputs['input_ids'].shape[1]
 
     with torch.no_grad():
@@ -219,35 +245,45 @@ def generate_reply(messages):
             **inputs,
             max_new_tokens=150,
             temperature=0.3,
-            repetition_penalty=1.18,
+            repetition_penalty=1.18,  # penaliza repetição das tags do LimaRP
             pad_token_id=_tokenizer.eos_token_id,
             eos_token_id=_tokenizer.eos_token_id,
             do_sample=True,
         )
 
+    # Recorta apenas os tokens gerados (exclui o contexto de entrada)
     raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
-    print(f'[Inoria] Raw output: {raw[:200]}')
+    print(f'[Inoria] Raw output: {raw[:300]}')
 
+    # Detecta alucinação: tags do LimaRP com texto longo
     is_hallucination = bool(re.search(r'<(FIRST|SECOND|USER|THIRD)>', raw)) and len(raw) > 150
     if is_hallucination:
-        print('[Inoria] Alucinacao detectada, retornando fallback.')
-        return {'reply': 'Hmm, o que foi?', 'acoes': []}
+        print('[Inoria] Alucinacao LimaRP detectada, retornando fallback.')
+        return {'reply': 'Deu um bug aqui na minha cabeça, repete? 😵', 'acoes': []}
 
-    match = re.search(r'\{.*?\}', raw, re.DOTALL)
-    if match:
+    # Extrai o JSON mais externo respeitando chaves aninhadas.
+    # IMPORTANTE: não usar regex não-guloso r'\{.*?\}' aqui — ele para no
+    # primeiro '}' e quebra o parse quando acoes contém objetos aninhados.
+    json_str = _extract_outermost_json(raw)
+    if json_str:
         try:
-            data = _json.loads(match.group(0))
-            return {
-                'reply': str(data.get('reply', '') or data.get('mensagem_texto', '') or raw),
-                'acoes': data.get('acoes', []),
-            }
-        except Exception:
-            pass
+            data = _json.loads(json_str)
+            reply_text = str(
+                data.get('reply') or data.get('mensagem_texto') or raw
+            ).strip()
+            acoes = data.get('acoes', [])
+            # Garante que acoes é sempre uma lista (aiBrain.js espera array)
+            if not isinstance(acoes, list):
+                acoes = []
+            return {'reply': reply_text, 'acoes': acoes}
+        except Exception as e:
+            print(f'[Inoria] Falha ao parsear JSON: {e} | json_str={json_str[:100]}')
 
+    # Fallback: resposta em texto puro (sem comandos)
     if raw and len(raw) < 500:
         return {'reply': raw, 'acoes': []}
 
-    return {'reply': 'Oi! Pode repetir?', 'acoes': []}
+    return {'reply': 'Deu um bug aqui na minha cabeça, repete? 😵', 'acoes': []}
 
 
 def handler(job):
