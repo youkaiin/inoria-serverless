@@ -231,16 +231,25 @@ def main():
     sft_params = inspect.signature(SFTTrainer.__init__).parameters
     tokenizer_kwarg = "processing_class" if "processing_class" in sft_params else "tokenizer"
 
+    # TRL 1.4+ renomeou max_seq_length→max_length, dataset_text_field→dataset_kwargs
+    sft_init = inspect.signature(SFTTrainer.__init__).parameters
+    extra = {}
+    if "max_seq_length" in sft_init:
+        extra["max_seq_length"] = MAX_SEQ_LENGTH
+        extra["dataset_text_field"] = "text"
+    else:
+        extra["max_length"] = MAX_SEQ_LENGTH
+        extra["dataset_kwargs"] = {"skip_prepare_dataset": False}
+
     trainer = SFTTrainer(
         model=model,
         **{tokenizer_kwarg: tokenizer},
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        max_seq_length=MAX_SEQ_LENGTH,
-        dataset_text_field="text",
-        data_collator=collator,   # <-- só treina no output do assistant
-        packing=False,            # packing=False é obrigatório com DataCollator
+        data_collator=collator,
+        packing=False,
+        **extra,
     )
 
     # ── 8. Treina ─────────────────────────────────────────────────────────────
