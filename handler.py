@@ -44,7 +44,7 @@ from pathlib import Path
 import runpod
 import torch
 import whisper
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configurações (variáveis de ambiente no RunPod)
@@ -61,7 +61,7 @@ REPETITION_PEN = float(os.getenv("REPETITION_PEN", "1.2"))
 # Estado global — carregado uma única vez por worker
 # ─────────────────────────────────────────────────────────────────────────────
 _tokenizer = None
-_pipe      = None
+_model     = None
 _whisper   = None
 
 
@@ -83,29 +83,24 @@ def ensure_model():
 
 def load_all():
     """Carrega modelo + Whisper na inicialização do worker."""
-    global _tokenizer, _pipe, _whisper
+    global _tokenizer, _model, _whisper
 
     ensure_model()
     print(f"[Inoria] Carregando tokenizer de {MODEL_PATH}...")
     _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    if _tokenizer.pad_token is None:
+        _tokenizer.pad_token = _tokenizer.eos_token
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype  = torch.float16 if device == "cuda" else torch.float32
     print(f"[Inoria] Carregando modelo em {dtype} no {device}...")
 
-    model = AutoModelForCausalLM.from_pretrained(
+    _model = AutoModelForCausalLM.from_pretrained(
         MODEL_PATH,
         trust_remote_code=True,
         torch_dtype=dtype,
     ).to(device)
-    model.eval()
-
-    _pipe = pipeline(
-        "text-generation",
-        model=model,
-        tokenizer=_tokenizer,
-        device=0 if device == "cuda" else -1,
-    )
+    _model.eval()
 
     print(f"[Inoria] ✅ Modelo carregado!")
 
@@ -207,13 +202,54 @@ REGRAS:
 # Geração de resposta
 # ─────────────────────────────────────────────────────────────────────────────
 def generate_reply(messages):
+    import re
+    device = next(_model.parameters()).device
+
     text = _tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
 
-    outputs = _pipe(
+    inputs = _tokenizer(text, return_tensors='pt').to(device)
+    input_length = inputs['input_ids'].shape[1]
+
+    with torch.no_grad():
+        outputs_raw = _model.generate(
+            **inputs,
+            max_new_tokens=150,
+            temperature=0.3,
+            repetition_penalty=1.18,
+            pad_token_id=_tokenizer.eos_token_id,
+            eos_token_id=_tokenizer.eos_token_id,
+            do_sample=True,
+        )
+
+    raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
+    print(f'[Inoria] Raw output: {raw[:200]}')
+
+    is_hallucination = bool(re.search(r'<(FIRST|SECOND|USER|THIRD)>', raw)) and len(raw) > 150
+    if is_hallucination:
+        print('[Inoria] Alucinacao detectada, retornando fallback.')
+        return {'reply': 'Hmm, o que foi?', 'acoes': []}
+
+    match = re.search(r'\{.*?\}', raw, re.DOTALL)
+    if match:
+        try:
+            data = _json.loads(match.group(0))
+            return {
+                'reply': str(data.get('reply', '') or data.get('mensagem_texto', '') or raw),
+                'acoes': data.get('acoes', []),
+            }
+        except Exception:
+            pass
+
+    if raw and len(raw) < 500:
+        return {'reply': raw, 'acoes': []}
+
+    return {'reply': 'Oi! Pode repetir?', 'acoes': []}
+
+def _REMOVED_dummy(
         text,
         max_new_tokens=MAX_NEW_TOKENS,
         temperature=TEMPERATURE,
