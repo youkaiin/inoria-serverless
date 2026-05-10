@@ -33,7 +33,7 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
+    DataCollatorForLanguageModeling,
 )
 from trl import SFTTrainer
 from transformers import DataCollatorForLanguageModeling
@@ -197,60 +197,83 @@ def main():
     # ── 6. Argumentos de treino ───────────────────────────────────────────────
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
-        num_train_epochs=NUM_EPOCHS,
-        per_device_train_batch_size=BATCH_SIZE,
-        per_device_eval_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
-        learning_rate=LEARNING_RATE,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-        
-        # Otimizações de memória
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
-        gradient_checkpointing=True,        # Troca velocidade por memória
-        optim="paged_adamw_32bit",          # Otimizador paginado (menos VRAM)
-        
-        # Logging e avaliação
-        logging_steps=50,
-        eval_strategy="epoch",
-        save_strategy="epoch",
-        save_total_limit=2,                 # Mantém só os 2 melhores checkpoints
-        load_best_model_at_end=True,
-        
-        # Relatórios
-        report_to="none",                   # Muda para "wandb" se quiser tracking
-        run_name="inoria-lite",
-    )
+    import inspect
+    # TRL 1.4 unificou tudo em SFTConfig (inclui packing, max_seq_length, etc.)
+    try:
+        from trl import SFTConfig
+        training_args = SFTConfig(
+            output_dir=OUTPUT_DIR,
+            num_train_epochs=NUM_EPOCHS,
+            per_device_train_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=GRAD_ACCUM,
+            learning_rate=LEARNING_RATE,
+            lr_scheduler_type="cosine",
+            warmup_steps=10,
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            gradient_checkpointing=True,
+            optim="paged_adamw_32bit",
+            logging_steps=10,
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=2,
+            load_best_model_at_end=True,
+            report_to="none",
+            run_name="inoria-lite",
+            max_seq_length=MAX_SEQ_LENGTH,
+            dataset_text_field="text",
+            packing=False,
+        )
+        use_sft_config = True
+    except (ImportError, TypeError):
+        from transformers import TrainingArguments
+        training_args = TrainingArguments(
+            output_dir=OUTPUT_DIR,
+            num_train_epochs=NUM_EPOCHS,
+            per_device_train_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=BATCH_SIZE,
+            gradient_accumulation_steps=GRAD_ACCUM,
+            learning_rate=LEARNING_RATE,
+            lr_scheduler_type="cosine",
+            warmup_steps=10,
+            fp16=not torch.cuda.is_bf16_supported(),
+            bf16=torch.cuda.is_bf16_supported(),
+            gradient_checkpointing=True,
+            optim="paged_adamw_32bit",
+            logging_steps=10,
+            eval_strategy="epoch",
+            save_strategy="epoch",
+            save_total_limit=2,
+            load_best_model_at_end=True,
+            report_to="none",
+            run_name="inoria-lite",
+        )
+        use_sft_config = False
 
     # ── 7. Trainer ────────────────────────────────────────────────────────────
-    # TRL 1.4+ renomeou 'tokenizer' para 'processing_class'
-    import inspect
     sft_params = inspect.signature(SFTTrainer.__init__).parameters
     tokenizer_kwarg = "processing_class" if "processing_class" in sft_params else "tokenizer"
 
-    # TRL 1.4+ renomeou max_seq_length→max_length, dataset_text_field→dataset_kwargs
-    sft_init = inspect.signature(SFTTrainer.__init__).parameters
-    extra = {}
-    if "max_seq_length" in sft_init:
-        extra["max_seq_length"] = MAX_SEQ_LENGTH
-        extra["dataset_text_field"] = "text"
-    else:
-        extra["max_length"] = MAX_SEQ_LENGTH
-        extra["dataset_kwargs"] = {"skip_prepare_dataset": False}
-
-    trainer = SFTTrainer(
+    trainer_kwargs = dict(
         model=model,
-        **{tokenizer_kwarg: tokenizer},
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
         data_collator=collator,
-        packing=False,
-        **extra,
     )
+    trainer_kwargs[tokenizer_kwarg] = tokenizer
+
+    # Se não usou SFTConfig, passa os parâmetros SFT diretamente
+    if not use_sft_config:
+        if "max_seq_length" in sft_params:
+            trainer_kwargs["max_seq_length"] = MAX_SEQ_LENGTH
+        if "dataset_text_field" in sft_params:
+            trainer_kwargs["dataset_text_field"] = "text"
+        if "packing" in sft_params:
+            trainer_kwargs["packing"] = False
+
+    trainer = SFTTrainer(**trainer_kwargs)
 
     # ── 8. Treina ─────────────────────────────────────────────────────────────
     console.print("\n[bold green]Iniciando treino...[/bold green]")
