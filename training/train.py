@@ -1,26 +1,18 @@
 """
-train.py — PASSO 2: Fine-tuning QLoRA da Inori
+train.py — Fine-tuning QLoRA da Inoria (TRL 1.4+)
 
-Treina um modelo pequeno (1.5B-7B) com o dataset gerado pelo generate_data.py.
-Usa QLoRA: 4-bit quantization + LoRA adapters = treina em GPU de 6-8GB.
-
-O resultado é um modelo salvo em ./output/inoria-model/
-que pode ser carregado pelo servidor.
+Treina Qwen2.5-1.5B-Instruct com QLoRA no dataset curado da Inoria.
+Usa SFTConfig.assistant_only_loss=True (nativo TRL 1.4) para
+calcular loss apenas nas respostas do assistant — sem DataCollator manual.
 
 Execução:
   python training/train.py
-
-Requisitos de GPU (mínimo):
-  Qwen2.5-1.5B → 6GB VRAM
-  Qwen2.5-3B   → 10GB VRAM
-  Qwen2.5-7B   → 18GB VRAM
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Garante que imports relativos funcionem
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
@@ -28,114 +20,77 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 import torch
 from datasets import load_dataset
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    DataCollatorForLanguageModeling,
-)
-from trl import SFTTrainer
-from transformers import DataCollatorForLanguageModeling
-import numpy as np
-
-class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
-    """
-    Collator que mascara o loss no prompt — só treina na resposta do assistant.
-    Compatível com TRL 1.x que removeu essa classe.
-    """
-    def __init__(self, response_template: str, tokenizer, **kwargs):
-        super().__init__(tokenizer=tokenizer, mlm=False, **kwargs)
-        self.response_template = response_template
-        self.response_token_ids = tokenizer.encode(response_template, add_special_tokens=False)
-
-    def torch_call(self, examples):
-        batch = super().torch_call(examples)
-        for i in range(len(batch["labels"])):
-            response_token_ids = self.response_token_ids
-            input_ids = batch["input_ids"][i].tolist()
-            # Encontra a última ocorrência do template de resposta
-            for idx in range(len(input_ids) - len(response_token_ids), -1, -1):
-                if input_ids[idx: idx + len(response_token_ids)] == response_token_ids:
-                    # Mascara tudo antes da resposta
-                    batch["labels"][i, :idx + len(response_token_ids)] = -100
-                    break
-            else:
-                # Template não encontrado — mascara tudo (não aprende nada desse exemplo)
-                batch["labels"][i] = -100
-        return batch
+from peft import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from trl import SFTConfig, SFTTrainer
 from rich.console import Console
 
 console = Console()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configurações (lidas do .env)
+# Configurações
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_MODEL      = os.getenv("BASE_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
-DATASET_PATH    = os.getenv("DATASET_PATH", "./data/inoria_dataset.jsonl")
-OUTPUT_DIR      = os.getenv("OUTPUT_DIR", "./output/inoria-model")
-LORA_RANK       = int(os.getenv("LORA_RANK", "32"))
-LORA_ALPHA      = int(os.getenv("LORA_ALPHA", "64"))
-LORA_DROPOUT    = float(os.getenv("LORA_DROPOUT", "0.05"))
-LEARNING_RATE   = float(os.getenv("LEARNING_RATE", "2e-4"))
-NUM_EPOCHS      = int(os.getenv("NUM_EPOCHS", "4"))
-BATCH_SIZE      = int(os.getenv("BATCH_SIZE", "4"))
-GRAD_ACCUM      = int(os.getenv("GRADIENT_ACCUMULATION", "4"))
-MAX_SEQ_LENGTH  = int(os.getenv("MAX_SEQ_LENGTH", "2048"))
+BASE_MODEL     = os.getenv("BASE_MODEL",             "Qwen/Qwen2.5-1.5B-Instruct")
+DATASET_PATH   = os.getenv("DATASET_PATH",           "./data/inoria_dataset.jsonl")
+OUTPUT_DIR     = os.getenv("OUTPUT_DIR",             "./output/inoria-model")
+LORA_RANK      = int(os.getenv("LORA_RANK",          "32"))
+LORA_ALPHA     = int(os.getenv("LORA_ALPHA",         "64"))
+LORA_DROPOUT   = float(os.getenv("LORA_DROPOUT",     "0.05"))
+LEARNING_RATE  = float(os.getenv("LEARNING_RATE",    "2e-4"))
+NUM_EPOCHS     = int(os.getenv("NUM_EPOCHS",         "4"))
+BATCH_SIZE     = int(os.getenv("BATCH_SIZE",         "4"))
+GRAD_ACCUM     = int(os.getenv("GRADIENT_ACCUMULATION", "4"))
+MAX_SEQ_LENGTH = int(os.getenv("MAX_SEQ_LENGTH",     "2048"))
 
 
 def main():
-    console.print("\n[bold cyan]═══ Inoria Lite — Fine-tuning QLoRA ═══[/bold cyan]")
-    console.print(f"Modelo base: [yellow]{BASE_MODEL}[/yellow]")
-    console.print(f"Dataset: [yellow]{DATASET_PATH}[/yellow]")
-    console.print(f"Saída: [yellow]{OUTPUT_DIR}[/yellow]")
-    console.print(f"GPU: [yellow]{torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU (não recomendado)'}[/yellow]")
-    console.print(f"VRAM disponível: [yellow]{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB[/yellow]\n")
+    console.print("\n[bold cyan]═══ Inoria Lite — Fine-tuning QLoRA (TRL 1.4) ═══[/bold cyan]")
+    console.print(f"Modelo base  : [yellow]{BASE_MODEL}[/yellow]")
+    console.print(f"Dataset      : [yellow]{DATASET_PATH}[/yellow]")
+    console.print(f"Saída        : [yellow]{OUTPUT_DIR}[/yellow]")
+    if torch.cuda.is_available():
+        console.print(f"GPU          : [yellow]{torch.cuda.get_device_name(0)}[/yellow]")
+        console.print(f"VRAM         : [yellow]{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f}GB[/yellow]\n")
 
-    # ── 1. Carrega e prepara o dataset ────────────────────────────────────────
+    # ── 1. Dataset ────────────────────────────────────────────────────────────
     console.print("[bold]Carregando dataset...[/bold]")
     dataset = load_dataset("json", data_files=DATASET_PATH, split="train")
-    
-    # Divide em treino e validação (90/10)
     dataset = dataset.train_test_split(test_size=0.1, seed=42)
     console.print(f"  Treino: {len(dataset['train'])} | Validação: {len(dataset['test'])}")
 
     # ── 2. Tokenizer ─────────────────────────────────────────────────────────
     console.print("\n[bold]Carregando tokenizer...[/bold]")
-    tokenizer = AutoTokenizer.from_pretrained(
-        BASE_MODEL,
-        trust_remote_code=True,
-        padding_side="right",
-    )
+    tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── 3. Modelo com quantização 4-bit (QLoRA) ───────────────────────────────
+    # Verificação rápida do dataset
+    sample = tokenizer.apply_chat_template(
+        dataset["train"][0]["messages"],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    assert "<|im_start|>" in sample, "ERRO: ChatML não encontrado!"
+    console.print("[green]✓ ChatML detectado no dataset[/green]")
+
+    # ── 3. Modelo em 4-bit (QLoRA) ────────────────────────────────────────────
     console.print("\n[bold]Carregando modelo em 4-bit (QLoRA)...[/bold]")
-    
-    # Configuração da quantização — reduz VRAM ~4x
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",          # NormalFloat4 — melhor qualidade
+        bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,     # quantiza os pesos de quantização tbm
+        bnb_4bit_use_double_quant=True,
     )
-
     model = AutoModelForCausalLM.from_pretrained(
         BASE_MODEL,
         quantization_config=bnb_config,
-        device_map="auto",                  # distribui automático entre GPU/CPU
+        device_map="auto",
         trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
 
-    # Prepara o modelo para treino com gradientes em 4-bit
-    model = prepare_model_for_kbit_training(model)
-
-    # ── 4. Configuração LoRA ──────────────────────────────────────────────────
+    # ── 4. LoRA ───────────────────────────────────────────────────────────────
     console.print("\n[bold]Configurando LoRA adapters...[/bold]")
-    
-    # Detecta os módulos de atenção automaticamente
     target_modules = _find_target_modules(model)
     console.print(f"  Target modules: {target_modules}")
 
@@ -148,164 +103,72 @@ def main():
         target_modules=target_modules,
     )
 
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()  # Mostra % de parâmetros treináveis
-
-    # ── 5. Formata dataset para o chat template do modelo ─────────────────────
-    console.print("\n[bold]Formatando dataset com ChatML (apply_chat_template)...[/bold]")
-    console.print("[dim]Isso tatua o ChatML no modelo — corrige a amnésia de formatação.[/dim]")
-
-    def format_conversation(example):
-        """
-        Aplica o chat template NATIVO do Qwen2.5 ao dataset.
-        
-        Isso é o coração do retreino: forçamos o modelo a ver as conversas
-        no formato ChatML correto (<|im_start|>...<|im_end|>) em vez de
-        texto bruto ou tags LimaRP (<FIRST>/<SECOND>).
-        
-        add_generation_prompt=False é ESSENCIAL durante o treino —
-        o modelo precisa ver a resposta completa, não apenas o prompt de geração.
-        """
-        return {
-            "text": tokenizer.apply_chat_template(
-                example["messages"],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        }
-
-    dataset = dataset.map(format_conversation, remove_columns=dataset["train"].column_names)
-
-    # ── 5b. Verificação de sanidade ───────────────────────────────────────────
-    # Confirma que o ChatML está presente e o JSON está nas respostas
-    sample = dataset["train"][0]["text"]
-    console.print(f"\n[dim]Exemplo de dado formatado:[/dim]")
-    console.print(f"[dim]{sample[:400]}...[/dim]\n")
-    assert "<|im_start|>" in sample, "ERRO: ChatML não encontrado no dataset!"
-    assert "<|im_start|>assistant" in sample, "ERRO: marcador de assistant não encontrado!"
-    console.print("[green]✓ ChatML detectado corretamente no dataset[/green]")
-
-    # ── 5c. DataCollator — só treina na resposta do assistant ─────────────────
-    # Sem isso, o modelo aprende a "prever" perguntas do usuário também,
-    # desperdiçando capacidade. Com isso, só o token da resposta gera loss.
-    response_template = "<|im_start|>assistant\n"
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template,
-        tokenizer=tokenizer,
-    )
-
-    # ── 6. Argumentos de treino ───────────────────────────────────────────────
+    # ── 5. SFTConfig (TRL 1.4 — tudo centralizado aqui) ──────────────────────
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-    import inspect
-    # TRL 1.4 unificou tudo em SFTConfig (inclui packing, max_seq_length, etc.)
-    try:
-        from trl import SFTConfig
-        training_args = SFTConfig(
-            output_dir=OUTPUT_DIR,
-            num_train_epochs=NUM_EPOCHS,
-            per_device_train_batch_size=BATCH_SIZE,
-            per_device_eval_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRAD_ACCUM,
-            learning_rate=LEARNING_RATE,
-            lr_scheduler_type="cosine",
-            warmup_steps=10,
-            fp16=not torch.cuda.is_bf16_supported(),
-            bf16=torch.cuda.is_bf16_supported(),
-            gradient_checkpointing=True,
-            optim="paged_adamw_32bit",
-            logging_steps=10,
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            save_total_limit=2,
-            load_best_model_at_end=True,
-            report_to="none",
-            run_name="inoria-lite",
-            max_seq_length=MAX_SEQ_LENGTH,
-            dataset_text_field="text",
-            packing=False,
-        )
-        use_sft_config = True
-    except (ImportError, TypeError):
-        from transformers import TrainingArguments
-        training_args = TrainingArguments(
-            output_dir=OUTPUT_DIR,
-            num_train_epochs=NUM_EPOCHS,
-            per_device_train_batch_size=BATCH_SIZE,
-            per_device_eval_batch_size=BATCH_SIZE,
-            gradient_accumulation_steps=GRAD_ACCUM,
-            learning_rate=LEARNING_RATE,
-            lr_scheduler_type="cosine",
-            warmup_steps=10,
-            fp16=not torch.cuda.is_bf16_supported(),
-            bf16=torch.cuda.is_bf16_supported(),
-            gradient_checkpointing=True,
-            optim="paged_adamw_32bit",
-            logging_steps=10,
-            eval_strategy="epoch",
-            save_strategy="epoch",
-            save_total_limit=2,
-            load_best_model_at_end=True,
-            report_to="none",
-            run_name="inoria-lite",
-        )
-        use_sft_config = False
+    sft_config = SFTConfig(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=NUM_EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM,
+        learning_rate=LEARNING_RATE,
+        lr_scheduler_type="cosine",
+        warmup_steps=10,
+        bf16=torch.cuda.is_bf16_supported(),
+        fp16=not torch.cuda.is_bf16_supported(),
+        gradient_checkpointing=True,
+        optim="paged_adamw_32bit",
+        # Parâmetros SFT nativos do TRL 1.4
+        max_length=MAX_SEQ_LENGTH,
+        dataset_text_field="text",
+        packing=False,
+        # ✅ Loss só nas respostas do assistant — nativo TRL 1.4
+        # Substitui DataCollatorForCompletionOnlyLM sem gambiarras
+        assistant_only_loss=True,
+        logging_steps=10,
+        eval_strategy="epoch",
+        save_strategy="epoch",
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        report_to="none",
+        run_name="inoria-lite",
+    )
 
-    # ── 7. Trainer ────────────────────────────────────────────────────────────
-    sft_params = inspect.signature(SFTTrainer.__init__).parameters
-    tokenizer_kwarg = "processing_class" if "processing_class" in sft_params else "tokenizer"
-
-    trainer_kwargs = dict(
+    # ── 6. Trainer ────────────────────────────────────────────────────────────
+    trainer = SFTTrainer(
         model=model,
-        args=training_args,
+        processing_class=tokenizer,
+        args=sft_config,
         train_dataset=dataset["train"],
         eval_dataset=dataset["test"],
-        data_collator=collator,
+        peft_config=lora_config,
     )
-    trainer_kwargs[tokenizer_kwarg] = tokenizer
 
-    # Se não usou SFTConfig, passa os parâmetros SFT diretamente
-    if not use_sft_config:
-        if "max_seq_length" in sft_params:
-            trainer_kwargs["max_seq_length"] = MAX_SEQ_LENGTH
-        if "dataset_text_field" in sft_params:
-            trainer_kwargs["dataset_text_field"] = "text"
-        if "packing" in sft_params:
-            trainer_kwargs["packing"] = False
+    trainer.model.print_trainable_parameters()
 
-    trainer = SFTTrainer(**trainer_kwargs)
-
-    # ── 8. Treina ─────────────────────────────────────────────────────────────
+    # ── 7. Treina ─────────────────────────────────────────────────────────────
     console.print("\n[bold green]Iniciando treino...[/bold green]")
-    console.print("[dim]Isso pode levar de 1h a 8h dependendo da GPU e tamanho do dataset.[/dim]\n")
-
+    console.print("[dim]RTX 4090 + 1.5B + 89 exemplos → ~5-10 minutos[/dim]\n")
     trainer.train()
 
-    # ── 9. Salva o modelo final ───────────────────────────────────────────────
+    # ── 8. Salva ──────────────────────────────────────────────────────────────
     console.print("\n[bold]Salvando modelo final...[/bold]")
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
 
     console.print(f"\n[bold green]✅ Treino completo![/bold green]")
     console.print(f"Modelo salvo em: [yellow]{Path(OUTPUT_DIR).absolute()}[/yellow]")
-    console.print("\n[dim]Próximo passo: python server/server.py[/dim]")
 
 
-def _find_target_modules(model) -> list[str]:
-    """
-    Detecta automaticamente os módulos de atenção para aplicar LoRA.
-    Funciona com Qwen2.5, Phi-3, LLaMA, Mistral, etc.
-    """
-    # Nomes comuns de módulos de atenção em diferentes arquiteturas
-    common_targets = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
-    
+def _find_target_modules(model) -> list:
+    common = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     found = []
-    for name, module in model.named_modules():
-        module_name = name.split(".")[-1]
-        if module_name in common_targets and module_name not in found:
-            found.append(module_name)
-    
-    return found if found else ["q_proj", "v_proj"]  # fallback
+    for name, _ in model.named_modules():
+        part = name.split(".")[-1]
+        if part in common and part not in found:
+            found.append(part)
+    return found or ["q_proj", "v_proj"]
 
 
 if __name__ == "__main__":
