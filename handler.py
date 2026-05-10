@@ -253,37 +253,45 @@ def generate_reply(messages):
 
     # Recorta apenas os tokens gerados (exclui o contexto de entrada)
     raw = _tokenizer.decode(outputs_raw[0][input_length:], skip_special_tokens=True).strip()
-    print(f'[Inoria] Raw output: {raw[:300]}')
+    print(f'[Inoria] Raw output: {raw[:400]}')
 
-    # Detecta alucinação: tags do LimaRP com texto longo
-    is_hallucination = bool(re.search(r'<(FIRST|SECOND|USER|THIRD)>', raw)) and len(raw) > 150
-    if is_hallucination:
-        print('[Inoria] Alucinacao LimaRP detectada, retornando fallback.')
-        return {'reply': 'Deu um bug aqui na minha cabeça, repete? 😵', 'acoes': []}
-
-    # Extrai o JSON mais externo respeitando chaves aninhadas.
-    # IMPORTANTE: não usar regex não-guloso r'\{.*?\}' aqui — ele para no
-    # primeiro '}' e quebra o parse quando acoes contém objetos aninhados.
+    # ── Tenta extrair JSON primeiro (modelo bem treinado) ────────────────────
     json_str = _extract_outermost_json(raw)
     if json_str:
         try:
             data = _json.loads(json_str)
-            reply_text = str(
-                data.get('reply') or data.get('mensagem_texto') or raw
-            ).strip()
+            reply_text = str(data.get('reply') or data.get('mensagem_texto') or '').strip()
             acoes = data.get('acoes', [])
-            # Garante que acoes é sempre uma lista (aiBrain.js espera array)
             if not isinstance(acoes, list):
                 acoes = []
-            return {'reply': reply_text, 'acoes': acoes}
+            if reply_text:
+                return {'reply': reply_text, 'acoes': acoes}
         except Exception as e:
             print(f'[Inoria] Falha ao parsear JSON: {e} | json_str={json_str[:100]}')
 
-    # Fallback: resposta em texto puro (sem comandos)
-    if raw and len(raw) < 500:
-        return {'reply': raw, 'acoes': []}
+    # ── Extrai texto de tags LimaRP (<FIRST>texto</FIRST>, etc.) ─────────────
+    # O modelo foi treinado com LimaRP e pode gerar este formato em vez de JSON.
+    # Em vez de descartar, extraímos o conteúdo útil das tags.
+    lirarp_match = re.search(
+        r'<(?:FIRST|SECOND|THIRD|USER)>(.*?)</(?:FIRST|SECOND|THIRD|USER)>',
+        raw, re.DOTALL
+    )
+    if lirarp_match:
+        texto_extraido = lirarp_match.group(1).strip()
+        # Remove ações entre asteriscos (*sorri*, *faz isso*) — estilo LimaRP
+        texto_extraido = re.sub(r'\*[^*]+\*', '', texto_extraido).strip()
+        texto_extraido = re.sub(r'\s+', ' ', texto_extraido).strip()
+        if texto_extraido and len(texto_extraido) < 500:
+            print(f'[Inoria] Texto extraído de tag LimaRP: {texto_extraido[:100]}')
+            return {'reply': texto_extraido, 'acoes': []}
 
-    return {'reply': 'Deu um bug aqui na minha cabeça, repete? 😵', 'acoes': []}
+    # ── Fallback: usa texto bruto se razoável ────────────────────────────────
+    raw_limpo = re.sub(r'\*[^*]+\*', '', raw).strip()
+    raw_limpo = re.sub(r'\s+', ' ', raw_limpo).strip()
+    if raw_limpo and len(raw_limpo) < 500:
+        return {'reply': raw_limpo, 'acoes': []}
+
+    return {'reply': 'Oi! Pode repetir?', 'acoes': []}
 
 
 def handler(job):
