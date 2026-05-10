@@ -249,54 +249,7 @@ def generate_reply(messages):
 
     return {'reply': 'Oi! Pode repetir?', 'acoes': []}
 
-def _REMOVED_dummy(
-        text,
-        max_new_tokens=MAX_NEW_TOKENS,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        repetition_penalty=REPETITION_PEN,
-        do_sample=True,
-        pad_token_id=_tokenizer.eos_token_id,
-        eos_token_id=_tokenizer.eos_token_id,
-        return_full_text=False,
-    )
 
-    full_text = outputs[0]["generated_text"]
-    raw = full_text.strip()
-
-    for token in ["<|im_end|>", "<|endoftext|>", "</s>", "<|eot_id|>"]:
-        raw = raw.replace(token, "").strip()
-
-    # Detecta alucinações graves: resposta inteira é texto de treino em inglês
-    import re
-    is_hallucination = (
-        re.search(r'<(FIRST|SECOND|USER|THIRD)>', raw) is not None
-        and len(raw) > 200
-        and raw.count('"') > 4
-    )
-    if is_hallucination:
-        print(f"[Inoria] ⚠️ Alucinação detectada, retornando fallback.")
-        return {"reply": "Hmm, o que foi? �", "acoes": []}
-
-    try:
-        start = raw.find("{")
-        end   = raw.rfind("}") + 1
-        if start != -1 and end > start:
-            data = _json.loads(raw[start:end])
-            reply_text = str(data.get("reply", "") or data.get("mensagem_texto", "") or raw)
-            return {
-                "reply": reply_text,
-                "acoes": data.get("acoes", []),
-            }
-    except Exception:
-        pass
-
-    return {"reply": raw, "acoes": []}
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Handler principal do RunPod
-# ─────────────────────────────────────────────────────────────────────────────
 def handler(job):
     """
     Função chamada pelo RunPod para cada requisição.
