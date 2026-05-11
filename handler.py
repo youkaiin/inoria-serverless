@@ -262,9 +262,11 @@ def generate_reply(messages):
     with torch.no_grad():
         outputs_raw = _model.generate(
             **inputs,
-            max_new_tokens=150,
-            temperature=0.3,
-            repetition_penalty=1.18,
+            max_new_tokens=120,
+            temperature=0.45,
+            top_p=0.88,
+            top_k=40,
+            repetition_penalty=1.25,
             pad_token_id=_tokenizer.eos_token_id,
             eos_token_id=_tokenizer.eos_token_id,
             do_sample=True,
@@ -395,11 +397,36 @@ def handler(job):
 
     # ── HEALTH ────────────────────────────────────────────────────────────────
     elif action == "health":
+        import json as _j
+        tok_cfg = Path(MODEL_PATH) / "tokenizer_config.json"
+        has_tmpl = False
+        if tok_cfg.exists():
+            try:
+                has_tmpl = "chat_template" in _j.load(open(tok_cfg))
+            except Exception:
+                pass
         return {
             "status": "online",
             "model": MODEL_PATH,
             "device": "cuda" if torch.cuda.is_available() else "cpu",
+            "chat_template_ok": has_tmpl,
         }
+
+    # ── PATCH TOKENIZER — sobrescreve tokenizer_config.json do HF ────────
+    elif action == "patch_tokenizer":
+        import json as _j
+        from huggingface_hub import hf_hub_download as _hf_dl
+        hf_repo  = os.getenv("HF_REPO", "youka9987/inoria-model")
+        hf_token = os.getenv("HF_TOKEN")
+        try:
+            src = _hf_dl(hf_repo, "tokenizer_config.json", token=hf_token, force_download=True)
+            cfg = _j.load(open(src))
+            dest = Path(MODEL_PATH) / "tokenizer_config.json"
+            _j.dump(cfg, open(dest, "w"), ensure_ascii=False, indent=2)
+            has_tmpl = "chat_template" in cfg
+            return {"patched": True, "chat_template_ok": has_tmpl, "dest": str(dest)}
+        except Exception as e:
+            return {"patched": False, "error": str(e)}
 
     # ── DEBUG (temporário — remove após diagnóstico) ───────────────────────
     elif action == "debug_raw":
@@ -425,9 +452,11 @@ def handler(job):
         with torch.no_grad():
             outputs_raw = _model.generate(
                 **inputs,
-                max_new_tokens=200,
-                temperature=0.3,
-                repetition_penalty=1.18,
+                max_new_tokens=150,
+                temperature=0.45,
+                top_p=0.88,
+                top_k=40,
+                repetition_penalty=1.25,
                 pad_token_id=_tokenizer.eos_token_id,
                 eos_token_id=_tokenizer.eos_token_id,
                 do_sample=True,
