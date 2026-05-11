@@ -285,6 +285,17 @@ def generate_reply(messages):
             acoes = data.get('acoes', [])
             if not isinstance(acoes, list):
                 acoes = []
+            # Detecta se o modelo colocou JSON dentro do campo reply (double-wrap)
+            if reply_text.startswith('{') and ('acoes' in reply_text or 'reply' in reply_text):
+                try:
+                    inner = _json.loads(reply_text)
+                    inner_reply = str(inner.get('reply') or '').strip()
+                    inner_acoes = inner.get('acoes', [])
+                    if inner_reply and isinstance(inner_acoes, list):
+                        print(f'[Inoria] Double-wrap detectado e corrigido. Reply: {inner_reply[:80]}')
+                        return {'reply': inner_reply, 'acoes': inner_acoes}
+                except Exception:
+                    pass  # Não era JSON, usa reply_text normal
             if reply_text:
                 print(f'[Inoria] JSON válido extraído. Reply: {reply_text[:80]}')
                 return {'reply': reply_text, 'acoes': acoes}
