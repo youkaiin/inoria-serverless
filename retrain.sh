@@ -34,7 +34,7 @@ NUM_EPOCHS=6 BATCH_SIZE=4 GRADIENT_ACCUMULATION=4 python training/train.py
 # ── 5. Merge dos adapters ────────────────────────────────────────
 echo "[5/6] Fazendo merge dos adapters LoRA..."
 python - <<'PYEOF'
-import torch
+import torch, json
 from pathlib import Path
 from peft import PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -45,7 +45,11 @@ MERGED = "./inori-brain/merged-model"
 
 print(f"  Carregando base: {BASE}")
 tok = AutoTokenizer.from_pretrained(BASE, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(BASE, torch_dtype=torch.float16, device_map="auto", trust_remote_code=True)
+
+# Guarda o chat_template ANTES do save (transformers 5.x perde o campo)
+chat_template_backup = tok.chat_template
+
+model = AutoModelForCausalLM.from_pretrained(BASE, dtype=torch.float16, device_map="auto", trust_remote_code=True)
 
 print(f"  Carregando adapter: {LORA}")
 model = PeftModel.from_pretrained(model, LORA)
@@ -57,7 +61,16 @@ print(f"  Salvando em {MERGED}...")
 Path(MERGED).mkdir(parents=True, exist_ok=True)
 model.save_pretrained(MERGED)
 tok.save_pretrained(MERGED)
-print("  ✅ Merge concluído!")
+
+# Restaura o chat_template no tokenizer_config.json salvo
+tok_cfg_path = Path(MERGED) / "tokenizer_config.json"
+tok_cfg = json.load(open(tok_cfg_path))
+if "chat_template" not in tok_cfg or not tok_cfg["chat_template"]:
+    print("  Restaurando chat_template no tokenizer_config.json...")
+    tok_cfg["chat_template"] = chat_template_backup
+    json.dump(tok_cfg, open(tok_cfg_path, "w"), ensure_ascii=False, indent=2)
+
+print("  ✅ Merge concluído com chat_template preservado!")
 PYEOF
 
 # ── 6. Upload para HuggingFace ───────────────────────────────────
