@@ -279,6 +279,11 @@ def generate_reply(messages):
     # Usa _extract_outermost_json (respeita aninhamento) em vez de regex não-guloso.
     json_str = _extract_outermost_json(raw)
     if json_str:
+        # Repara padrão malformado que o modelo às vezes gera:
+        # {"comando:"fechar_grupo"","args":[]}  →  {"comando":"fechar_grupo","args":[]}
+        json_str = re.sub(r'"(comando|args|reply|acoes):"', r'"\1":', json_str)
+        # Remove vírgulas antes de } ou ]
+        json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
         try:
             data = _json.loads(json_str)
             reply_text = str(data.get('reply') or data.get('mensagem_texto') or '').strip()
