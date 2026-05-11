@@ -21,6 +21,7 @@ git pull origin main
 # ── 2. Instala dependências ──────────────────────────────────────
 echo "[2/6] Instalando dependências..."
 pip install -q -r requirements-runpod.txt
+pip install -q datasets trl peft transformers accelerate bitsandbytes rich python-dotenv huggingface_hub
 
 # ── 3. Gera o dataset ────────────────────────────────────────────
 echo "[3/6] Gerando dataset (228 exemplos)..."
